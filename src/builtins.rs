@@ -74,7 +74,7 @@ pub fn run(sh: &mut Shell, argv: &[String]) -> R {
         "wait" => wait(sh, args),
         "jobs" => jobs(sh, args),
         "fg" => fg(sh, args),
-        "bg" => Ok(0),
+        "bg" => bg(sh, args),
         "kill" => kill(sh, args),
         "disown" => disown(sh, args),
         "shopt" => shopt(sh, args),
@@ -1332,6 +1332,9 @@ pub fn sig_num(s: &str) -> Option<i32> {
         "ALRM" => 14,
         "TERM" => 15,
         "CHLD" => 17,
+        "CONT" => 18,
+        "STOP" => 19,
+        "TSTP" => 20,
         "WINCH" => 28,
         _ => return None,
     })
@@ -1476,9 +1479,14 @@ fn wait(sh: &mut Shell, args: &[String]) -> R {
 
 pub fn job_state(j: &mut Job) -> String {
     match j.poll() {
-        None => "Running".into(),
-        Some(0) => "Done".into(),
-        Some(s) => format!("Exit {}", s),
+        Some(0) => return "Done".into(),
+        Some(s) => return format!("Exit {}", s),
+        None => {}
+    }
+    if j.stopped {
+        "Stopped".into()
+    } else {
+        "Running".into()
     }
 }
 
@@ -1503,11 +1511,38 @@ fn jobs(sh: &mut Shell, args: &[String]) -> R {
     Ok(0)
 }
 
+fn bg(sh: &mut Shell, args: &[String]) -> R {
+    let spec = args.first().cloned().unwrap_or_else(|| "%+".into());
+    match find_job(sh, &spec) {
+        Some(i) => {
+            let (id, text, ok) = {
+                let j = &mut sh.jobs.list[i];
+                let ok = j.stopped && j.resume();
+                (j.id, j.text.clone(), ok)
+            };
+            if !ok {
+                sh.eprint(&format!("bg: {}: job is not stopped or cannot be resumed", spec));
+                return Ok(1);
+            }
+            sh.out(1, format!("[{}]+ {} &\n", id, text).as_bytes())?;
+            Ok(0)
+        }
+        None => {
+            sh.eprint(&format!("bg: {}: no such job", spec));
+            Ok(1)
+        }
+    }
+}
+
 fn fg(sh: &mut Shell, args: &[String]) -> R {
     let spec = args.first().cloned().unwrap_or_else(|| "%+".into());
     match find_job(sh, &spec) {
         Some(i) => {
             let mut j = sh.jobs.list.remove(i);
+            if j.stopped && !j.resume() {
+                sh.eprint(&format!("fg: {}: cannot resume in-process job", spec));
+                return Ok(1);
+            }
             sh.write_fd(1, format!("{}\n", j.text).as_bytes());
             Ok(j.wait())
         }
@@ -1538,7 +1573,7 @@ fn kill(sh: &mut Shell, args: &[String]) -> R {
         if let Some(n) = args.get(1) {
             if let Ok(num) = n.parse::<i32>() {
                 let num = if num > 128 { num - 128 } else { num };
-                for s in ["HUP", "INT", "QUIT", "ABRT", "KILL", "USR1", "USR2", "PIPE", "ALRM", "TERM"] {
+                for s in ["HUP", "INT", "QUIT", "ABRT", "KILL", "USR1", "USR2", "PIPE", "ALRM", "TERM", "STOP", "TSTP", "CONT"] {
                     if sig_num(s) == Some(num) {
                         sh.out(1, format!("{}\n", s).as_bytes())?;
                     }
@@ -1546,7 +1581,7 @@ fn kill(sh: &mut Shell, args: &[String]) -> R {
                 return Ok(0);
             }
         }
-        sh.out(1, b"HUP INT QUIT ABRT KILL USR1 USR2 PIPE ALRM TERM\n")?;
+        sh.out(1, b"HUP INT QUIT ABRT KILL USR1 USR2 PIPE ALRM TERM STOP TSTP CONT\n")?;
         return Ok(0);
     }
     while i < args.len() && args[i].starts_with('-') && args[i].len() > 1 {
@@ -1566,7 +1601,18 @@ fn kill(sh: &mut Shell, args: &[String]) -> R {
     for t in &args[i..] {
         if let Some(k) = find_job(sh, t) {
             if sig != 0 {
-                sh.jobs.list[k].kill();
+                let ok = match sig {
+                    18 => sh.jobs.list[k].resume(),
+                    19 | 20 => sh.jobs.list[k].suspend(),
+                    _ => {
+                        sh.jobs.list[k].kill();
+                        true
+                    }
+                };
+                if !ok {
+                    sh.eprint(&format!("kill: {}: cannot signal in-process job", t));
+                    st = 1;
+                }
             }
             continue;
         }
@@ -1595,9 +1641,16 @@ fn kill(sh: &mut Shell, args: &[String]) -> R {
                     if !crate::sys::pid_alive(pid) {
                         st = 1;
                     }
-                } else if !crate::sys::kill_pid(pid, 128 + sig as u32) {
-                    sh.eprint(&format!("kill: ({}) - No such process", pid));
-                    st = 1;
+                } else {
+                    let ok = match sig {
+                        18 => crate::sys::resume_pid(pid),
+                        19 | 20 => crate::sys::suspend_pid(pid),
+                        _ => crate::sys::kill_pid(pid, 128 + sig as u32),
+                    };
+                    if !ok {
+                        sh.eprint(&format!("kill: ({}) - No such process", pid));
+                        st = 1;
+                    }
                 }
             }
             Err(_) => {

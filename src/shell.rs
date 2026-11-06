@@ -198,6 +198,7 @@ pub struct Job {
     pub cancel: Arc<AtomicBool>,
     pub child_pid: Arc<AtomicU32>,
     pub notified: bool,
+    pub stopped: bool,
 }
 
 impl Job {
@@ -243,6 +244,30 @@ impl Job {
                     crate::sys::kill_pid(p, 1);
                 }
             }
+        }
+    }
+    pub fn suspend(&mut self) -> bool {
+        match &mut self.kind {
+            JobKind::Proc(c) => {
+                let ok = crate::sys::suspend_pid(c.id());
+                if ok {
+                    self.stopped = true;
+                }
+                ok
+            }
+            JobKind::Thread(_) => false,
+        }
+    }
+    pub fn resume(&mut self) -> bool {
+        match &mut self.kind {
+            JobKind::Proc(c) => {
+                let ok = crate::sys::resume_pid(c.id());
+                if ok {
+                    self.stopped = false;
+                }
+                ok
+            }
+            JobKind::Thread(_) => false,
         }
     }
 }
