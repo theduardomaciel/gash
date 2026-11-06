@@ -1510,7 +1510,7 @@ impl Shell {
             }
             ExeKind::Script => {
                 cmd = Proc::new(&crate::global().exe);
-                cmd.arg(res.path.as_os_str());
+                cmd.arg(crate::path::to_posix(&res.path));
                 for a in &argv[1..] {
                     cmd.arg(a);
                 }
@@ -1638,9 +1638,17 @@ impl Shell {
             }
         };
         let mut child = self.child_shell(assigns);
-        child.arg0 = argv[0].clone();
+        // Bash sets $0 to the resolved path when the command came from a PATH
+        // lookup, and keeps the word as typed when it contains a separator.
+        // Generated launchers (pnpm, corepack, ...) rely on $0 having a directory.
+        let arg0 = if has_path_sep(&argv[0]) {
+            argv[0].clone()
+        } else {
+            crate::path::to_posix(&res.path)
+        };
+        child.arg0 = arg0.clone();
         child.positional = argv[1..].to_vec();
-        child.source_name = argv[0].clone();
+        child.source_name = arg0;
         let st = child.run_main(&src);
         Ok(st)
     }
