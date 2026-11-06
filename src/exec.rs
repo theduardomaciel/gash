@@ -554,6 +554,7 @@ impl Shell {
                                 cancel,
                                 child_pid,
                                 notified: false,
+                                stopped: false,
                             });
                             return Ok(0);
                         }
@@ -570,6 +571,7 @@ impl Shell {
                             cancel,
                             child_pid,
                             notified: !self.interactive,
+                            stopped: false,
                         });
                         return Ok(0);
                     }
@@ -598,6 +600,7 @@ impl Shell {
             cancel,
             child_pid,
             notified: false,
+            stopped: false,
         });
         Ok(0)
     }
